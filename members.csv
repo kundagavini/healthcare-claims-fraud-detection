@@ -1,0 +1,13 @@
+plan,risk_tier,members,avg_score,avg_cost
+Plan A - Bronze,High,458,61.5,30242.3
+Plan A - Bronze,Low,525,16.9,6934.0
+Plan A - Bronze,Medium,942,36.5,14389.0
+Plan B - Silver,High,941,60.7,29838.2
+Plan B - Silver,Low,1075,16.7,6451.4
+Plan B - Silver,Medium,1876,36.1,13932.8
+Plan C - Gold,High,638,61.1,29883.8
+Plan C - Gold,Low,757,16.7,6798.4
+Plan C - Gold,Medium,1436,36.5,13748.7
+Plan D - Platinum,High,361,61.0,30058.0
+Plan D - Platinum,Low,346,16.4,6267.1
+Plan D - Platinum,Medium,645,36.4,13711.5

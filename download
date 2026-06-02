@@ -1,0 +1,237 @@
+# Power BI Dashboard Setup Guide
+## Population Health Risk Stratification
+
+Follow these steps to build the full dashboard in Power BI Desktop (~45 min).
+
+---
+
+## Step 1 — Import the 7 CSV Files
+
+1. Open **Power BI Desktop** → `Get Data` → `Text/CSV`
+2. Import all 7 files from the `/data/` folder, one at a time:
+
+| File | Purpose |
+|------|---------|
+| `powerbi_risk_tiers.csv` | Main fact table — one row per member |
+| `powerbi_population_summary.csv` | Pre-aggregated tier summary |
+| `powerbi_region_risk.csv` | Risk by geographic region |
+| `powerbi_plan_risk.csv` | Risk by insurance plan |
+| `powerbi_conditions_risk.csv` | Conditions driving high risk |
+| `powerbi_pcp_panel_risk.csv` | PCP panel risk profiles |
+| `powerbi_outreach_list.csv` | High-risk member outreach list |
+
+---
+
+## Step 2 — Data Types to Set
+
+In **Power Query Editor**, confirm these column types:
+
+### powerbi_risk_tiers
+| Column | Type |
+|--------|------|
+| member_id | Text |
+| age | Whole Number |
+| total_risk_score | Decimal Number |
+| total_cost_ytd | Decimal Number (currency) |
+| ed_visits_ytd | Whole Number |
+| inpatient_stays_ytd | Whole Number |
+| num_conditions | Whole Number |
+| open_gaps | Whole Number |
+| dual_eligible | Whole Number |
+| risk_tier | Text |
+
+---
+
+## Step 3 — Build These 6 Report Pages
+
+---
+
+### Page 1 — Executive Summary
+
+**Visuals to add:**
+
+**KPI Cards (top row)** — from `powerbi_risk_tiers`:
+- Total Members: `COUNT(member_id)`
+- High-Risk Members: `COUNTROWS(FILTER(powerbi_risk_tiers, risk_tier = "High"))`
+- Avg Risk Score: `AVERAGE(total_risk_score)`
+- Total High-Risk Cost: `SUMX(FILTER(powerbi_risk_tiers, risk_tier="High"), total_cost_ytd)`
+
+**Donut Chart** — Risk Tier Distribution
+- Legend: `risk_tier`
+- Values: `COUNT(member_id)`
+- Colors: Red = High, Amber = Medium, Green = Low
+
+**Stacked Bar Chart** — Members by Plan & Risk Tier
+- X-axis: `plan`
+- Y-axis: `COUNT(member_id)`
+- Legend: `risk_tier`
+
+**Table** — from `powerbi_population_summary`
+- Columns: risk_tier, member_count, pct_of_population, avg_risk_score, avg_cost_ytd, total_cost_ytd
+
+---
+
+### Page 2 — Risk Score Distribution
+
+**Histogram** — Risk Score Distribution
+- Use a `Clustered Column Chart`
+- Create bins with a calculated column:
+```
+Risk Score Bin = 
+SWITCH(TRUE(),
+    powerbi_risk_tiers[total_risk_score] < 10,  "0-9",
+    powerbi_risk_tiers[total_risk_score] < 20,  "10-19",
+    powerbi_risk_tiers[total_risk_score] < 30,  "20-29",
+    powerbi_risk_tiers[total_risk_score] < 40,  "30-39",
+    powerbi_risk_tiers[total_risk_score] < 50,  "40-49",
+    powerbi_risk_tiers[total_risk_score] < 60,  "50-59",
+    powerbi_risk_tiers[total_risk_score] < 70,  "60-69",
+    "70+"
+)
+```
+- X-axis: Risk Score Bin, Y-axis: COUNT(member_id)
+- Color by: risk_tier
+
+**Scatter Chart** — Cost vs. Risk Score
+- X-axis: `total_risk_score`
+- Y-axis: `total_cost_ytd`
+- Legend: `risk_tier`
+- Size: `num_conditions`
+
+**Stacked Bar** — Risk Score Components (avg by tier)
+- Axis: `risk_tier`
+- Values: AVG(clinical_score), AVG(utilization_score), AVG(social_score), AVG(gap_score)
+
+---
+
+### Page 3 — Geographic & Demographic View
+
+**Map Visual** — Risk by Region
+- Location: `region` (from `powerbi_region_risk`)
+- Color saturation: `high_risk_pct`
+- Tooltip: high_risk, total_members, avg_cost
+
+> Note: For the map visual, Power BI may need region names to match geographic data.
+> You can use a filled map with US region names or switch to a bar chart if preferred.
+
+**Clustered Bar Chart** — High-Risk % by Region
+- Axis: `region`
+- Values: `high_risk_pct`
+- Sort descending
+
+**Slicer** — Filter by:
+- `plan` (dropdown)
+- `gender` (list)
+- `dual_eligible` (list: 0/1)
+- `preferred_language` (dropdown)
+
+---
+
+### Page 4 — Clinical Deep Dive
+
+**Bar Chart** — Conditions Driving High Risk (from `powerbi_conditions_risk`)
+- Axis: `condition`
+- Values: `pct_high_risk`
+- Color: gradient (low → high)
+- Sort descending by pct_high_risk
+
+**Clustered Bar** — Members per Condition + High Risk Share
+- Axis: `condition`
+- Values: `members_with_condition`, `in_high_risk`
+- Sort by members_with_condition
+
+**Treemap** — Condition Burden vs. Cost
+- Group: `condition`
+- Values: `avg_cost`
+- Color: `pct_high_risk`
+
+---
+
+### Page 5 — PCP Panel Dashboard
+
+This page is designed for **care management staff** to identify which PCPs need support.
+
+**Table** — from `powerbi_pcp_panel_risk`
+- Columns: pcp_id, panel_size, high_risk_patients, high_risk_pct, avg_panel_risk_score, avg_cost_per_patient
+- Add conditional formatting on `high_risk_pct` (red > 35%, amber > 20%)
+
+**Bar Chart** — Top 20 PCPs by High-Risk %
+- Axis: `pcp_id`
+- Values: `high_risk_pct`
+- Reference line at 30% (org average)
+
+**Scatter** — Panel Size vs. High-Risk %
+- X: `panel_size`
+- Y: `high_risk_pct`
+- Size: `avg_cost_per_patient`
+- Tooltip: pcp_id
+
+---
+
+### Page 6 — Care Management Outreach List
+
+**Table** — from `powerbi_outreach_list` (high-risk members only)
+- Columns: member_id, age, gender, plan, region, dual_eligible, total_risk_score, num_conditions, ed_visits_ytd, inpatient_stays_ytd, total_cost_ytd, open_gaps, open_gap_list, recommended_intervention
+- Sort by: total_risk_score (descending)
+- Conditional formatting on total_risk_score (color scale)
+- Filter panel: region, plan, dual_eligible
+
+**KPI Cards**:
+- High-Risk Members: 2,398
+- Dual-Eligible High-Risk: `COUNTROWS(FILTER(powerbi_outreach_list, dual_eligible=1))`
+- Avg Open Gaps (High-Risk): `AVERAGE(powerbi_outreach_list[open_gaps])`
+- Avg Cost (High-Risk): `AVERAGE(total_cost_ytd)`
+
+---
+
+## Step 4 — Key DAX Measures to Create
+
+In the **Modeling** tab → `New Measure`:
+
+```dax
+Total Members = COUNTROWS(powerbi_risk_tiers)
+
+High Risk Members = 
+CALCULATE(COUNTROWS(powerbi_risk_tiers), powerbi_risk_tiers[risk_tier] = "High")
+
+High Risk % = 
+DIVIDE([High Risk Members], [Total Members], 0)
+
+High Risk Total Cost = 
+CALCULATE(SUM(powerbi_risk_tiers[total_cost_ytd]), powerbi_risk_tiers[risk_tier] = "High")
+
+Avg Risk Score = AVERAGE(powerbi_risk_tiers[total_risk_score])
+
+Cost Per High Risk Member = 
+DIVIDE([High Risk Total Cost], [High Risk Members], 0)
+
+Dual Eligible High Risk = 
+CALCULATE([High Risk Members], powerbi_risk_tiers[dual_eligible] = 1)
+```
+
+---
+
+## Step 5 — Formatting Tips
+
+- **Theme**: Use Power BI's "Executive" or "Innovate" theme for a clean look
+- **Colors**: Set High = `#DC2626` (red), Medium = `#F59E0B` (amber), Low = `#1D9E75` (teal)
+  - Go to: View → Customize current theme → Data colors
+- **Report title** on each page: use a Text Box with `"Population Health Risk Stratification | 2024"`
+- **Logo placeholder**: Insert → Image (add your org logo or a health icon)
+
+---
+
+## Step 6 — Publish to Power BI Service (optional)
+
+1. File → `Publish` → Select your workspace
+2. In Power BI Service, set up **scheduled refresh** if connecting to live data
+3. Share dashboard link with care management and clinical leadership teams
+
+---
+
+## Screenshot Tip for GitHub README
+
+After building the dashboard:
+1. Take screenshots of each page
+2. Save to `/docs/screenshots/`
+3. Add to README with: `![Executive Summary](docs/screenshots/executive_summary.png)`

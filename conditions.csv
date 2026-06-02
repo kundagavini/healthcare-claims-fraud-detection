@@ -1,0 +1,6 @@
+region,total_members,high_risk,medium_risk,low_risk,high_risk_pct,avg_cost
+Midwest,2041.0,479.0,1035.0,527.0,23.5,15684.0
+Northeast,1980.0,465.0,984.0,531.0,23.5,15665.0
+Southeast,1995.0,466.0,977.0,552.0,23.4,15615.0
+Southwest,1992.0,487.0,960.0,545.0,24.4,16328.0
+West,1992.0,501.0,943.0,548.0,25.2,15718.0

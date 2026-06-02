@@ -1,0 +1,197 @@
+"""
+Population Health Risk Stratification — Analysis Pipeline
+Loads CSVs → SQLite → builds risk scores → exports Power BI-ready CSVs
+"""
+import sqlite3
+import pandas as pd
+from pathlib import Path
+
+BASE    = Path(__file__).parent.parent
+DB_PATH = BASE / "data" / "population_health.db"
+OUT     = BASE / "data"
+
+conn = sqlite3.connect(DB_PATH)
+
+# ── Load CSVs ─────────────────────────────────────────────────────────────────
+print("Loading data...")
+members  = pd.read_csv(BASE/"data"/"members.csv")
+conds    = pd.read_csv(BASE/"data"/"conditions.csv")
+util     = pd.read_csv(BASE/"data"/"utilization.csv")
+gaps     = pd.read_csv(BASE/"data"/"care_gaps.csv")
+
+for col in ["dual_eligible","continuous_enrollment"]:
+    members[col] = members[col].map({True:1,False:0,"True":1,"False":0})
+gaps["gap_open"] = gaps["gap_open"].map({True:1,False:0,"True":1,"False":0})
+
+for df, name in [(members,"members"),(conds,"conditions"),(util,"utilization"),(gaps,"care_gaps")]:
+    df.to_sql(name, conn, if_exists="replace", index=False)
+    print(f"  {name}: {len(df):,}")
+
+# ── Build risk score directly in Python/SQL ───────────────────────────────────
+print("\nBuilding risk scores...")
+
+# Condition burden
+cond_burden = conds.groupby("member_id").agg(
+    num_conditions=("condition","count"),
+    condition_list=("condition", lambda x: " | ".join(sorted(set(x))))
+).reset_index()
+high_acuity = conds[conds["condition"].isin(["CHF","Atrial Fibrillation","CKD"])]
+cond_burden["has_high_acuity_dx"] = cond_burden["member_id"].isin(high_acuity["member_id"]).astype(int)
+
+# Care gaps
+gap_summary = gaps.groupby("member_id").agg(
+    total_measures=("gap_measure","count"),
+    open_gaps=("gap_open","sum")
+).reset_index()
+open_gap_list = gaps[gaps["gap_open"]==1].groupby("member_id")["gap_measure"].apply(lambda x: " | ".join(x)).reset_index()
+open_gap_list.columns = ["member_id","open_gap_list"]
+gap_summary = gap_summary.merge(open_gap_list, on="member_id", how="left")
+
+# Utilization flags
+util["flag_high_ed"]        = (util["ed_visits_ytd"] >= 3).astype(int)
+util["flag_high_inpatient"] = (util["inpatient_stays_ytd"] >= 2).astype(int)
+util["flag_high_cost"]      = (util["total_cost_ytd"] >= 20000).astype(int)
+util["flag_no_pcp_visit"]   = (util["days_since_last_pcp"] >= 365).astype(int)
+
+# Merge everything
+df = members.merge(cond_burden, on="member_id", how="left") \
+            .merge(util,        on="member_id", how="left") \
+            .merge(gap_summary, on="member_id", how="left")
+
+df["num_conditions"]    = df["num_conditions"].fillna(0)
+df["has_high_acuity_dx"]= df["has_high_acuity_dx"].fillna(0)
+df["open_gaps"]         = df["open_gaps"].fillna(0)
+df["condition_list"]    = df["condition_list"].fillna("None")
+df["open_gap_list"]     = df["open_gap_list"].fillna("None")
+
+# ── Domain scores ─────────────────────────────────────────────────────────────
+df["clinical_score"] = (
+    (df["num_conditions"] * 6 + df["has_high_acuity_dx"] * 10 +
+     df["age"].apply(lambda a: 5 if a>=75 else (2 if a>=65 else 0)))
+).clip(0, 40)
+
+df["utilization_score"] = (
+    df["flag_high_ed"].fillna(0)          * 10 +
+    df["flag_high_inpatient"].fillna(0)   * 12 +
+    df["flag_high_cost"].fillna(0)        * 5  +
+    df["flag_no_pcp_visit"].fillna(0)     * 5
+).clip(0, 30)
+
+df["social_score"] = (
+    df["dual_eligible"] * 8 +
+    df["preferred_language"].apply(lambda l: 4 if l != "English" else 0) +
+    df["continuous_enrollment"].apply(lambda e: 3 if e == 0 else 0)
+).clip(0, 15)
+
+df["gap_score"] = (df["open_gaps"] * 3).clip(0, 15)
+
+df["total_risk_score"] = (
+    df["clinical_score"] + df["utilization_score"] +
+    df["social_score"]   + df["gap_score"]
+).round(1)
+
+df["risk_tier"] = pd.cut(
+    df["total_risk_score"],
+    bins=[-1, 24.9, 49.9, 200],
+    labels=["Low","Medium","High"]
+).astype(str)
+
+df["recommended_intervention"] = df["risk_tier"].map({
+    "High":   "Intensive Care Management — weekly touchpoint",
+    "Medium": "Care Coordination — monthly outreach",
+    "Low":    "Preventive Monitoring — annual wellness focus",
+})
+
+# ── Export Power BI CSVs ──────────────────────────────────────────────────────
+print("\nExporting Power BI CSVs...")
+
+# 1. Full member risk table
+cols = ["member_id","age","gender","plan","region","pcp_id","dual_eligible",
+        "preferred_language","num_conditions","condition_list",
+        "ed_visits_ytd","inpatient_stays_ytd","outpatient_visits_ytd",
+        "total_cost_ytd","days_since_last_pcp","open_gaps","open_gap_list",
+        "clinical_score","utilization_score","social_score","gap_score",
+        "total_risk_score","risk_tier","recommended_intervention"]
+risk_out = df[[c for c in cols if c in df.columns]]
+risk_out.to_csv(OUT/"powerbi_risk_tiers.csv", index=False)
+print(f"  powerbi_risk_tiers.csv: {len(risk_out):,}")
+
+# 2. Population summary
+pop_summary = df.groupby("risk_tier").agg(
+    member_count=("member_id","count"),
+    avg_risk_score=("total_risk_score","mean"),
+    avg_conditions=("num_conditions","mean"),
+    avg_ed_visits=("ed_visits_ytd","mean"),
+    avg_ip_stays=("inpatient_stays_ytd","mean"),
+    avg_cost_ytd=("total_cost_ytd","mean"),
+    total_cost_ytd=("total_cost_ytd","sum"),
+).round(1).reset_index()
+pop_summary["pct_of_population"] = (pop_summary["member_count"]/len(df)*100).round(1)
+pop_summary.to_csv(OUT/"powerbi_population_summary.csv", index=False)
+
+# 3. Region risk
+region_risk = df.groupby("region").apply(lambda g: pd.Series({
+    "total_members": len(g),
+    "high_risk":   (g["risk_tier"]=="High").sum(),
+    "medium_risk": (g["risk_tier"]=="Medium").sum(),
+    "low_risk":    (g["risk_tier"]=="Low").sum(),
+    "high_risk_pct": round((g["risk_tier"]=="High").mean()*100, 1),
+    "avg_cost":    round(g["total_cost_ytd"].mean(), 0),
+})).reset_index()
+region_risk.to_csv(OUT/"powerbi_region_risk.csv", index=False)
+
+# 4. Plan risk
+plan_risk = df.groupby(["plan","risk_tier"]).agg(
+    members=("member_id","count"),
+    avg_score=("total_risk_score","mean"),
+    avg_cost=("total_cost_ytd","mean"),
+).round(1).reset_index()
+plan_risk.to_csv(OUT/"powerbi_plan_risk.csv", index=False)
+
+# 5. Conditions driving high risk
+cond_risk_rows = []
+for cname in conds["condition"].unique():
+    mids = set(conds.loc[conds["condition"]==cname, "member_id"])
+    sub  = df[df["member_id"].isin(mids)]
+    cond_risk_rows.append({
+        "condition": cname,
+        "members_with_condition": len(sub),
+        "in_high_risk": (sub["risk_tier"]=="High").sum(),
+        "pct_high_risk": round((sub["risk_tier"]=="High").mean()*100, 1),
+        "avg_cost": round(sub["total_cost_ytd"].mean(), 0),
+    })
+cond_risk = pd.DataFrame(cond_risk_rows).sort_values("pct_high_risk", ascending=False)
+cond_risk.to_csv(OUT/"powerbi_conditions_risk.csv", index=False)
+
+# 6. PCP panel risk
+pcp_risk = df.groupby("pcp_id").apply(lambda g: pd.Series({
+    "panel_size": len(g),
+    "high_risk_patients": (g["risk_tier"]=="High").sum(),
+    "high_risk_pct": round((g["risk_tier"]=="High").mean()*100, 1),
+    "avg_panel_risk_score": round(g["total_risk_score"].mean(), 1),
+    "avg_cost_per_patient": round(g["total_cost_ytd"].mean(), 0),
+})).reset_index()
+pcp_risk = pcp_risk[pcp_risk["panel_size"]>=30].sort_values("high_risk_pct", ascending=False)
+pcp_risk.to_csv(OUT/"powerbi_pcp_panel_risk.csv", index=False)
+
+# 7. Priority outreach
+outreach = df[df["risk_tier"]=="High"].sort_values("total_risk_score", ascending=False)
+outreach[[c for c in cols if c in df.columns]].to_csv(OUT/"powerbi_outreach_list.csv", index=False)
+
+conn.close()
+
+print(f"  powerbi_population_summary.csv")
+print(f"  powerbi_region_risk.csv")
+print(f"  powerbi_plan_risk.csv")
+print(f"  powerbi_conditions_risk.csv")
+print(f"  powerbi_pcp_panel_risk.csv")
+print(f"  powerbi_outreach_list.csv: {len(outreach):,} high-risk members")
+
+print("\n" + "="*55)
+print("POPULATION RISK SUMMARY")
+print("="*55)
+print(pop_summary[["risk_tier","member_count","pct_of_population",
+                   "avg_risk_score","avg_cost_ytd","total_cost_ytd"]].to_string(index=False))
+print(f"\nTotal members:        {len(df):,}")
+print(f"High-risk members:    {(df['risk_tier']=='High').sum():,}")
+print(f"High-risk total cost: ${df.loc[df['risk_tier']=='High','total_cost_ytd'].sum():,.0f}")
